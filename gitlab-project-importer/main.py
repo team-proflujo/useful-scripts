@@ -56,6 +56,12 @@ def getConfigData():
                 data['gitlab']['accessToken'] = parser['gitlab']['accessToken']
             else:
                 errors.append('Invalid "accessToken" option in "gitlab" section.')
+
+            if 'keyFile' in parser['gitlab'] and parser['gitlab']['keyFile']:
+                data['gitlab']['keyFile'] = parser['gitlab']['keyFile']
+
+            if 'useHTTPToMoveCode' in parser['gitlab'] and parser['gitlab']['useHTTPToMoveCode'] == 'yes':
+                data['gitlab']['useHTTPToMoveCode'] = True
         else:
             errors.append('"gitlab" config options not found.')
     else:
@@ -212,7 +218,7 @@ def addUsersToProject(users: list, accessLevel: gitlab.const.AccessLevel, logger
 # addUsersToProject
 
 # importProject
-def importProject(project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstance: objects.ProjectManager):
+def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstance: objects.ProjectManager):
     cloneDirPath = os.path.join(APP_ROOT_DIR, TEMP_CLONE_DIR)
     logger = ProjectImportLogger(project)
 
@@ -220,6 +226,19 @@ def importProject(project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstanc
         os.mkdir(cloneDirPath)
 
     projectDirPath = os.path.join(cloneDirPath, project['name'])
+    gitSSHCommand = 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+    gitlabProjectURL = glProjectInstance.ssh_url_to_repo
+
+    if 'keyFile' in config['gitlab'] and config['gitlab']['keyFile']:
+        gitSSHCommand += f' -i ' + config['gitlab']['keyFile']
+    elif 'useHTTPToMoveCode' in config['gitlab'] and config['gitlab']['useHTTPToMoveCode']:
+        gitlabProjectURL = glProjectInstance.http_url_to_repo
+        gitlabProjectURLPrefix = config['gitlab']['adminUser'] + ':' + config['gitlab']['accessToken'] + '@'
+
+        if gitlabProjectURL.startswith('https://'):
+            gitlabProjectURL = gitlabProjectURL.replace('https://', 'https://' + gitlabProjectURLPrefix)
+        elif gitlabProjectURL.startswith('http://'):
+            gitlabProjectURL = gitlabProjectURL.replace('http://', 'http://' + gitlabProjectURLPrefix)
 
     if os.path.isdir(projectDirPath):
         isCloned = True
@@ -232,7 +251,7 @@ def importProject(project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstanc
         if executeCommand('git remote -v | grep -w "gitlab"'):
             isCloned = True
         else:
-            isCloned = executeCommand('git remote add gitlab ' + glProjectInstance.ssh_url_to_repo)
+            isCloned = executeCommand('git remote add gitlab ' + gitlabProjectURL)
 
     if not isCloned:
         logger.print('Unable to download the project.')
@@ -241,7 +260,7 @@ def importProject(project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstanc
 
     logger.print('Setting SSH options for git...')
 
-    executeCommand('git config core.sshCommand "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"')
+    executeCommand(f'git config core.sshCommand "{gitSSHCommand}"')
 
     branches = executeCommand('git branch -r')
 
@@ -280,7 +299,7 @@ def importProject(project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstanc
                 isCodePushed = executeCommand(f'git push --all gitlab && git push --tags gitlab')
 
                 if not isCodePushed:
-                    logger.print(f'Unable to move code in {branch} branch.')
+                    logger.print(f'Unable to move code in {branch} branch. Ensure if you have added the "SSH Key" in the GitLab Instance.')
 
                     return logger.rtn(False)
         # Iterate branches
@@ -372,7 +391,7 @@ def main():
                 project['name'] = projectName
 
                 # Start import process as a thread
-                threads.append(executor.submit(importProject, project, gitlabInstance, glProjectInstance))
+                threads.append(executor.submit(importProject, config, project, gitlabInstance, glProjectInstance))
 
             # Iterate projects to Import
 
