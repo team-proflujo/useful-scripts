@@ -82,18 +82,22 @@ def getProjectsList(projectsListFile):
         {
             'name': 'projectLink',
             'heading': 'Project',
+            'required': True,
         },
         {
             'name': 'maintainers',
             'heading': 'RW+',
-        }, 
+            'required': False,
+        },
         {
             'name': 'developers',
             'heading': 'RW',
-        }, 
+            'required': False,
+        },
         {
             'name': 'testers',
             'heading': 'R',
+            'required': False,
         },
     ]
     ALPHABETS: Final = list(string.ascii_uppercase)
@@ -136,12 +140,13 @@ def getProjectsList(projectsListFile):
                                         projectData['sourceDomain'] = row[colIndex].split('https://')[1].split('/')[0]
                                     else:
                                         projectData['sourceDomain'] = row[colIndex].split('http://')[1].split('/')[0]
-                                elif re.match(r'^git\@.+\:.+\.git$', row[colIndex]):
-                                    projectData['sourceDomain'] = row[colIndex].split('git@')[1].split(':')[0]
+                                elif re.match(r'^.+\@.+\:.+\.git$', row[colIndex]):
+                                    projectData['sourceDomain'] = row[colIndex].split('@')[1].split(':')[0]
                                 else:
                                     colErr = 'Column ' + ALPHABETS[colIndex] + ' is invalid. It should be a valid Git URL. Refer: https://git-scm.com/docs/git-clone#URLS.'
                         else:
-                            colErr = 'Column ' + ALPHABETS[colIndex] + ' is empty.'
+                               if col['required']:
+                                    colErr = 'Column ' + ALPHABETS[colIndex] + ' is empty.'
 
                         if colErr:
                             rowErrors.append(colErr)
@@ -191,6 +196,8 @@ class ProjectImportLogger:
 
 # addUsersToProject
 def addUsersToProject(users: list, accessLevel: gitlab.const.AccessLevel, logger: ProjectImportLogger, gitlabInstance: gitlab.Gitlab, glProjectInstance: objects.ProjectManager):
+    users = [ user for user in users if user ]
+
     for user in users:
         user = user.strip()
 
@@ -241,8 +248,12 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
             gitlabProjectURL = gitlabProjectURL.replace('http://', 'http://' + gitlabProjectURLPrefix)
 
     if os.path.isdir(projectDirPath):
+        logger.print('Project is already downloaded...')
+
         isCloned = True
     else:
+        logger.print('Downloading...')
+
         isCloned = executeCommand('git clone ' + project['projectLink'] + ' ' + projectDirPath)
 
     if isCloned:
@@ -294,12 +305,12 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
                     return logger.rtn(False)
 
-                logger.print(f'Moving branch: {branch}...')
+                logger.print(f'Uploading branch: {branch} to GitLab...')
 
                 isCodePushed = executeCommand(f'git push --all gitlab && git push --tags gitlab')
 
                 if not isCodePushed:
-                    logger.print(f'Unable to move code in {branch} branch. Ensure if you have added the "SSH Key" in the GitLab Instance.')
+                    logger.print(f'Unable to upload code in {branch} branch to GitLab. Ensure if you have added the "SSH Key" in the GitLab Instance.')
 
                     return logger.rtn(False)
         # Iterate branches
@@ -331,6 +342,8 @@ def main():
     projects = getProjectsList(config['projectsListFile'])
 
     if projects and len(projects) > 0:
+        executeCommand(f'git config --global core.sshCommand "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"')
+
         gitlabInstance = gitlab.Gitlab(config['gitlab']['baseURL'], private_token = config['gitlab']['accessToken'])
 
         # Thread pool executor
@@ -339,7 +352,7 @@ def main():
 
             # Iterate projects to Import
             for project in projects:
-                projectName = project['projectLink'].split('/')[-1].split('.git')[0]
+                projectName = project['projectLink'].split(':')[-1].split('/')[-1].split('.git')[0]
                 isImporting = False
                 shouldCreateProject = True
                 glProjectInstance = None
@@ -365,7 +378,7 @@ def main():
                                 shouldCreateProject = False
                                 glProjectInstance = glProject
 
-                                print(f'Project: {projectName} is empty.')
+                                print(f'Project: {projectName} was created in GitLab but, is empty.')
                             else:
                                 isProjectImported = True
 
