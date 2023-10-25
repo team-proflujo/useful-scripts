@@ -1,6 +1,8 @@
-import gitlab, gitlab.const, os, subprocess, concurrent.futures, configparser, re, string, time, csv, shutil
+import gitlab, gitlab.const, os, subprocess, concurrent.futures, configparser, re, string, time, csv, shutil, urllib3, requests
 from typing import Final
 from gitlab.v4 import objects
+
+requests.packages.urllib3.disable_warnings()
 
 APP_ROOT_DIR: Final = os.path.abspath(os.path.dirname( __file__ )).rstrip('/\\')
 MAX_THREAD_SIZE: Final = 1
@@ -254,7 +256,7 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
     else:
         logger.print('Downloading...')
 
-        isCloned = executeCommand('git clone ' + project['projectLink'] + ' ' + projectDirPath)
+        isCloned = executeCommand('git clone --mirror ' + project['projectLink'] + ' ' + projectDirPath)
 
     if isCloned:
         os.chdir(projectDirPath)
@@ -273,7 +275,7 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
     executeCommand(f'git config core.sshCommand "{gitSSHCommand}"')
 
-    branches = executeCommand('git branch -r')
+    branches = executeCommand('git branch -a')
 
     if not branches:
         logger.print('Unable to get the branches')
@@ -344,7 +346,7 @@ def main():
     if projects and len(projects) > 0:
         executeCommand(f'git config --global core.sshCommand "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"')
 
-        gitlabInstance = gitlab.Gitlab(config['gitlab']['baseURL'], private_token = config['gitlab']['accessToken'])
+        gitlabInstance = gitlab.Gitlab(config['gitlab']['baseURL'], private_token = config['gitlab']['accessToken'], ssl_verify = False)
 
         # Thread pool executor
         with concurrent.futures.ThreadPoolExecutor(max_workers = MAX_THREAD_SIZE) as executor:
