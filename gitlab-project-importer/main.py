@@ -1,6 +1,7 @@
-import gitlab, gitlab.const, os, subprocess, concurrent.futures, configparser, re, string, time, csv, shutil, urllib3, requests
+import gitlab, gitlab.const, os, subprocess, concurrent.futures, configparser, re, string, csv, shutil, requests
 from typing import Final
 from gitlab.v4 import objects
+from datetime import datetime
 
 requests.packages.urllib3.disable_warnings()
 
@@ -64,6 +65,11 @@ def getConfigData():
 
             if 'useHTTPToMoveCode' in parser['gitlab'] and parser['gitlab']['useHTTPToMoveCode'] == 'yes':
                 data['gitlab']['useHTTPToMoveCode'] = True
+
+            if 'forceReDownload' in parser['gitlab'] and parser['gitlab']['forceReDownload'] == 'yes':
+                data['gitlab']['forceReDownload'] = True
+            else:
+                data['gitlab']['forceReDownload'] = False
         else:
             errors.append('"gitlab" config options not found.')
     else:
@@ -189,7 +195,7 @@ class ProjectImportLogger:
         self.project = project
 
     def print(self, *args, **kwargs):
-        print('[' + self.project['name'] + ']:', *args, **kwargs)
+        print('(' + datetime.now().strftime('%d-%m-%Y %I:%M:%S %p') + ') [' + self.project['name'] + ']:', *args, **kwargs)
 
     def rtn(self, *args):
         return (self.project['name'], *args)
@@ -226,6 +232,31 @@ def addUsersToProject(users: list, accessLevel: gitlab.const.AccessLevel, logger
 
 # addUsersToProject
 
+# updateGitObjects
+def updateGitObjects(logger: ProjectImportLogger):
+    commands = [
+        'git fsck',
+        'git prune',
+        'git repack',
+        'git fsck',
+    ]
+
+    logger.print('Updating Git objects...')
+
+    for command in commands:
+        logger.print(f'Running "{command}"...')
+
+        cmdSuccess = executeCommand(command)
+
+        if not cmdSuccess:
+            logger.print('Command failed.')
+
+            return False
+
+    return True
+
+# updateGitObjects
+
 # importProject
 def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstance: objects.ProjectManager):
     cloneDirPath = os.path.join(APP_ROOT_DIR, TEMP_CLONE_DIR)
@@ -249,6 +280,12 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
         elif gitlabProjectURL.startswith('http://'):
             gitlabProjectURL = gitlabProjectURL.replace('http://', 'http://' + gitlabProjectURLPrefix)
 
+    if config['gitlab']['forceReDownload']:
+        if os.path.isdir(projectDirPath):
+            logger.print('Removing previously downloaded copy...')
+
+            shutil.rmtree(projectDirPath)
+
     if os.path.isdir(projectDirPath):
         logger.print('Project is already downloaded...')
 
@@ -256,7 +293,7 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
     else:
         logger.print('Downloading...')
 
-        isCloned = executeCommand('git clone --mirror ' + project['projectLink'] + ' ' + projectDirPath)
+        isCloned = executeCommand('git clone ' + project['projectLink'] + ' ' + projectDirPath)
 
     if isCloned:
         os.chdir(projectDirPath)
@@ -275,7 +312,10 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
     executeCommand(f'git config core.sshCommand "{gitSSHCommand}"')
 
-    branches = executeCommand('git branch -a')
+    # if not updateGitObjects(logger):
+    #     return logger.rtn(False)
+
+    branches = executeCommand('git branch -r')
 
     if not branches:
         logger.print('Unable to get the branches')
@@ -285,37 +325,120 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
         _, branches = branches
 
         branches = [branch.strip() for branch in branches.split('\n') if branch.strip().startswith('origin/')]
+        processedBranches = []
+
+        # To avoid git track error, exclude local branches:
+        localBranches = executeCommand('git branch')
+
+        if localBranches:
+            _, localBranches = localBranches
+
+            for localBranch in localBranches.split('\n'):
+                localBranch = localBranch.strip()
+
+                if localBranch.startswith('*'):
+                    localBranch = localBranch.split(' ')[1]
+
+                if localBranch:
+                    processedBranches.append(localBranch)
 
         # Iterate branches
         for branch in branches:
-            if branch.startswith('*') or branch.startswith('origin/HEAD'):
+            if branch.startswith('origin/HEAD'):
+                branch = branch.split(' ')[-1]
+
+            if branch.startswith('*') or branch in processedBranches:
                 pass
             else:
                 branch = branch.replace('origin/', '')
 
-                isBranchSwitched = executeCommand(f'git switch {branch}')
+                if branch in processedBranches:
+                    continue
 
-                if not isBranchSwitched:
-                    logger.print(f'Unable to switch to branch: {branch}')
+                logger.print(f'Tracking branch: {branch}...')
 
-                    return logger.rtn(False)
+                isBranchTracked = executeCommand(f'git branch --track {branch} origin/{branch}')
 
-                isBranchPulled = executeCommand(f'git pull')
-
-                if not isBranchPulled:
-                    logger.print(f'Unable to get the code in {branch} branch.')
+                if not isBranchTracked:
+                    logger.print('Unable to track branch')
 
                     return logger.rtn(False)
 
-                logger.print(f'Uploading branch: {branch} to GitLab...')
+                # isBranchSwitched = executeCommand(f'git checkout {branch}')
 
-                isCodePushed = executeCommand(f'git push --all gitlab && git push --tags gitlab')
+                # if not isBranchSwitched:
+                #     logger.print(f'Unable to switch to branch: {branch}')
 
-                if not isCodePushed:
-                    logger.print(f'Unable to upload code in {branch} branch to GitLab. Ensure if you have added the "SSH Key" in the GitLab Instance.')
+                #     return logger.rtn(False)
 
-                    return logger.rtn(False)
+                # isBranchPulled = executeCommand(f'git pull origin {branch}')
+
+                # if not isBranchPulled:
+                #     logger.print(f'Unable to get the code in {branch} branch.')
+
+                #     return logger.rtn(False)
+
+                # isTagsPulled = executeCommand('git fetch --tags')
+
+                # if not isTagsPulled:
+                #     logger.print(f'Unable to get the tags in {branch} branch.')
+
+                #     return logger.rtn(False)
+
+                # isRepacked = executeCommand('git repack -a')
+
+                # if not isRepacked:
+                #     logger.print('Unable to repack.')
+
+                #     return logger.rtn(False)
+
+                # logger.print(f'Uploading branch: {branch} to GitLab...')
+
+                # isCodePushed = executeCommand(f'git push gitlab {branch}')
+
+                # if not isCodePushed:
+                #     logger.print(f'Unable to upload code in {branch} branch to GitLab.')
+
+                #     return logger.rtn(False)
+
+                processedBranches.append(branch)
         # Iterate branches
+
+        logger.print('Updating downloaded repository...')
+
+        isFetched = executeCommand('git fetch --all')
+
+        if not isFetched:
+            logger.print('Unable to update repository')
+
+            return logger.rtn(False)
+
+        logger.print('Merging changes to downloaded repository...')
+
+        isPulled = executeCommand('git pull --all')
+
+        if not isPulled:
+            logger.print('Unable to merge changes')
+
+            return logger.rtn(False)
+
+        logger.print('Uploading code to GitLab...')
+
+        isCodePushed = executeCommand('git push --set-upstream gitlab --all')
+
+        if not isCodePushed:
+            logger.print('Unable to upload code to GitLab')
+
+            return logger.rtn(False)
+
+        logger.print('Uploading tags to GitLab...')
+
+        isTagsPushed = executeCommand('git push --set-upstream gitlab --tags')
+
+        if not isTagsPushed:
+            logger.print(f'Unable to upload tags to GitLab.')
+
+            return logger.rtn(False)
 
     logger.print(f'Assigning users to the project...')
 
@@ -370,10 +493,10 @@ def main():
                     print(f'Import of {projectName} is already started.')
                     continue
                 else:
-                    isProjectImported = False
+                    # isProjectImported = False
 
                     # Check if project is already created in GitLab
-                    for glProject in gitlabInstance.projects.list():
+                    for glProject in gitlabInstance.projects.list(all = True):
                         if glProject.name == projectName:
                             # Check if project in GitLab is empty
                             if len(glProject.branches.list()) == 0:
@@ -381,14 +504,14 @@ def main():
                                 glProjectInstance = glProject
 
                                 print(f'Project: {projectName} was created in GitLab but, is empty.')
-                            else:
-                                isProjectImported = True
+                            # else:
+                            #     isProjectImported = True
 
                             break
 
-                    if isProjectImported:
-                        print(f'Project: {projectName} was already imported into GitLab.')
-                        continue
+                    # if isProjectImported:
+                    #     print(f'Project: {projectName} was already imported into GitLab.')
+                    #     continue
 
                 # Mark the project import is started
                 with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'a') as fpProcessing:
