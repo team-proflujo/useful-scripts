@@ -257,21 +257,82 @@ def updateGitObjects(logger: ProjectImportLogger):
 
 # updateGitObjects
 
+# repoURLToName
+def repoURLToName(url):
+    return url.split(':')[-1].split('/')[-1].split('.git')[0]
+
+# repoURLToName
+
+# preImportCheck
+def preImportCheck(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, logger: ProjectImportLogger):
+    projectName = repoURLToName(project['projectLink'])
+    isImporting = False
+    shouldCreateProject = True
+    glProjectInstance = None
+
+    # Check if projects is being imported
+    if os.path.isfile(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE)):
+        with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'r') as fpProcessing:
+            for importingProject in fpProcessing.readlines():
+                if importingProject.strip() == projectName:
+                    isImporting = True
+
+    if isImporting:
+        logger.print(f'Import of {projectName} is already started.')
+
+        return False
+    else:
+        # isProjectImported = False
+
+        # Check if project is already created in GitLab
+        for glProject in gitlabInstance.projects.list(all = True):
+            if glProject.name == projectName:
+                # Check if project in GitLab is empty
+                if len(glProject.branches.list()) == 0:
+                    shouldCreateProject = False
+                    glProjectInstance = glProject
+
+                    logger.print(f'Project: {projectName} was created in GitLab but, is empty.')
+
+    # Mark the project import is started
+    with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'a') as fpProcessing:
+        fpProcessing.write(f'\n{projectName}')
+
+    # Create the project in GitLab if not already created
+    if shouldCreateProject:
+        createdProject = gitlabInstance.projects.create({
+            'name': projectName,
+            'namespace': config['gitlab']['adminUser'],
+        })
+
+        glProjectInstance = createdProject
+
+    project['name'] = projectName
+
+    return (config, project, gitlabInstance, glProjectInstance)
+
+# preImportCheck
+
 # importProject
-def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, glProjectInstance: objects.ProjectManager):
+def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, isModule: bool = False):
     cloneDirPath = os.path.join(APP_ROOT_DIR, TEMP_CLONE_DIR)
+    projectDirPath = os.path.join(cloneDirPath, project['name'])
+
     logger = ProjectImportLogger(project)
 
     if not os.path.isdir(cloneDirPath):
         os.mkdir(cloneDirPath)
 
-    projectDirPath = os.path.join(cloneDirPath, project['name'])
-    gitSSHCommand = 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+    checkResult = preImportCheck(config, project, gitlabInstance, logger)
+
+    if not checkResult:
+        return logger.rtn(False)
+
+    config, project, gitlabInstance, glProjectInstance = checkResult
+
     gitlabProjectURL = glProjectInstance.ssh_url_to_repo
 
-    if 'keyFile' in config['gitlab'] and config['gitlab']['keyFile']:
-        gitSSHCommand += f' -i ' + config['gitlab']['keyFile']
-    elif 'useHTTPToMoveCode' in config['gitlab'] and config['gitlab']['useHTTPToMoveCode']:
+    if 'useHTTPToMoveCode' in config['gitlab'] and config['gitlab']['useHTTPToMoveCode']:
         gitlabProjectURL = glProjectInstance.http_url_to_repo
         gitlabProjectURLPrefix = config['gitlab']['adminUser'] + ':' + config['gitlab']['accessToken'] + '@'
 
@@ -308,12 +369,51 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
         return logger.rtn(False)
 
-    logger.print('Setting SSH options for git...')
+    # Check and process Child repos first
+    logger.print('Checking if project has modules...')
 
-    executeCommand(f'git config core.sshCommand "{gitSSHCommand}"')
+    gitModulesFile = os.path.join(projectDirPath, '.gitmodules')
+    modulesImported = 0
 
-    # if not updateGitObjects(logger):
-    #     return logger.rtn(False)
+    if os.path.isfile(gitModulesFile):
+        modulesParser = configparser.ConfigParser()
+        modulesParser.read(gitModulesFile)
+
+        for mSec in modulesParser.sections():
+            if mSec.startswith('[submodule'):
+                module = {
+                    'projectLink': modulesParser[mSec]['url'],
+                    'isModule': True,
+                    'branch': modulesParser[mSec]['branch'],
+                }
+                mName = repoURLToName(module['projectLink'])
+
+                logger.print(f'Beginning process of {mName} module...')
+
+                result = importProject(config, module, gitlabInstance, True)
+                isImported = False
+
+                if result:
+                    mName, success, newRepoURL = result
+
+                    if success:
+                        logger.print('Updating Git modules file...')
+
+                        with open(gitModulesFile, 'r+') as fpGitModule:
+                            fpGitModule.write( fpGitModule.read().replace( module['projectLink'], newRepoURL ) )
+
+                        modulesImported += 1
+
+                if not isImported:
+                    logger.print('Unable to import Git module.')
+
+                    return logger.rtn(False)
+
+    if modulesImported > 0:
+        if not executeCommand('git add .gitmodules && git commit -m "Modules imported"'):
+            logger.print('Unable to commit the modules update.')
+
+            return logger.rtn(False)
 
     branches = executeCommand('git branch -r')
 
@@ -364,43 +464,6 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
                     return logger.rtn(False)
 
-                # isBranchSwitched = executeCommand(f'git checkout {branch}')
-
-                # if not isBranchSwitched:
-                #     logger.print(f'Unable to switch to branch: {branch}')
-
-                #     return logger.rtn(False)
-
-                # isBranchPulled = executeCommand(f'git pull origin {branch}')
-
-                # if not isBranchPulled:
-                #     logger.print(f'Unable to get the code in {branch} branch.')
-
-                #     return logger.rtn(False)
-
-                # isTagsPulled = executeCommand('git fetch --tags')
-
-                # if not isTagsPulled:
-                #     logger.print(f'Unable to get the tags in {branch} branch.')
-
-                #     return logger.rtn(False)
-
-                # isRepacked = executeCommand('git repack -a')
-
-                # if not isRepacked:
-                #     logger.print('Unable to repack.')
-
-                #     return logger.rtn(False)
-
-                # logger.print(f'Uploading branch: {branch} to GitLab...')
-
-                # isCodePushed = executeCommand(f'git push gitlab {branch}')
-
-                # if not isCodePushed:
-                #     logger.print(f'Unable to upload code in {branch} branch to GitLab.')
-
-                #     return logger.rtn(False)
-
                 processedBranches.append(branch)
         # Iterate branches
 
@@ -442,21 +505,20 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, gl
 
     logger.print(f'Assigning users to the project...')
 
-    addUsersToProject(project['maintainers'].split(','), gitlab.const.AccessLevel.MAINTAINER, logger, gitlabInstance, glProjectInstance)
+    if 'maintainers' in project:
+        addUsersToProject(project['maintainers'].split(','), gitlab.const.AccessLevel.MAINTAINER, logger, gitlabInstance, glProjectInstance)
 
-    addUsersToProject(project['developers'].split(','), gitlab.const.AccessLevel.DEVELOPER, logger, gitlabInstance, glProjectInstance)
+    if 'developers' in project:
+        addUsersToProject(project['developers'].split(','), gitlab.const.AccessLevel.DEVELOPER, logger, gitlabInstance, glProjectInstance)
 
-    addUsersToProject(project['testers'].split(','), gitlab.const.AccessLevel.REPORTER, logger, gitlabInstance, glProjectInstance)
+    if 'testers' in project:
+        addUsersToProject(project['testers'].split(','), gitlab.const.AccessLevel.REPORTER, logger, gitlabInstance, glProjectInstance)
 
     # Remove project from processing entries
     with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'w+') as fpProcessing:
         fpProcessing.write(fpProcessing.read().strip().replace(project['name'], '').strip())
 
-    logger.print('Cleaning up...')
-
-    shutil.rmtree(projectDirPath)
-
-    return logger.rtn(True)
+    return logger.rtn(True, gitlabProjectURL)
 
 # importProject
 
@@ -467,7 +529,12 @@ def main():
     projects = getProjectsList(config['projectsListFile'])
 
     if projects and len(projects) > 0:
-        executeCommand(f'git config --global core.sshCommand "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"')
+        gitSSHCommand = 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no'
+
+        if 'keyFile' in config['gitlab'] and config['gitlab']['keyFile']:
+            gitSSHCommand += ' -i ' + config['gitlab']['keyFile']
+
+        executeCommand(f'git config --global core.sshCommand "{gitSSHCommand}"')
 
         gitlabInstance = gitlab.Gitlab(config['gitlab']['baseURL'], private_token = config['gitlab']['accessToken'], ssl_verify = False)
 
@@ -477,59 +544,8 @@ def main():
 
             # Iterate projects to Import
             for project in projects:
-                projectName = project['projectLink'].split(':')[-1].split('/')[-1].split('.git')[0]
-                isImporting = False
-                shouldCreateProject = True
-                glProjectInstance = None
-
-                # Check if projects is being imported
-                if os.path.isfile(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE)):
-                    with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'r') as fpProcessing:
-                        for importingProject in fpProcessing.readlines():
-                            if importingProject.strip() == projectName:
-                                isImporting = True
-
-                if isImporting:
-                    print(f'Import of {projectName} is already started.')
-                    continue
-                else:
-                    # isProjectImported = False
-
-                    # Check if project is already created in GitLab
-                    for glProject in gitlabInstance.projects.list(all = True):
-                        if glProject.name == projectName:
-                            # Check if project in GitLab is empty
-                            if len(glProject.branches.list()) == 0:
-                                shouldCreateProject = False
-                                glProjectInstance = glProject
-
-                                print(f'Project: {projectName} was created in GitLab but, is empty.')
-                            # else:
-                            #     isProjectImported = True
-
-                            break
-
-                    # if isProjectImported:
-                    #     print(f'Project: {projectName} was already imported into GitLab.')
-                    #     continue
-
-                # Mark the project import is started
-                with open(os.path.join(APP_ROOT_DIR, PROCESSING_RECORD_FILE), 'a') as fpProcessing:
-                    fpProcessing.write(f'\n{projectName}')
-
-                # Create the project in GitLab if not already created
-                if shouldCreateProject:
-                    createdProject = gitlabInstance.projects.create({
-                        'name': projectName,
-                        'namespace': config['gitlab']['adminUser'],
-                    })
-
-                    glProjectInstance = createdProject
-
-                project['name'] = projectName
-
                 # Start import process as a thread
-                threads.append(executor.submit(importProject, config, project, gitlabInstance, glProjectInstance))
+                threads.append(executor.submit(importProject, config, project, gitlabInstance))
 
             # Iterate projects to Import
 
