@@ -450,7 +450,7 @@ def importProject(config: dict, project: dict, gitlabInstance: gitlab.Gitlab, is
             if branch.startswith('*') or branch in processedBranches:
                 pass
             else:
-                branch = branch.replace('origin/', '', 2)
+                branch = branch.replace('origin/', '', 1)
 
                 if branch in processedBranches:
                     continue
